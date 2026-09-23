@@ -1,9 +1,14 @@
 import os
+import secrets
 import tempfile
 
 
 class Config:
-    SECRET_KEY = os.environ.get("SECRET_KEY", "dev-secret-key-change-in-production")
+    # No fallback to a fixed string here on purpose: a hardcoded default becomes a publicly
+    # known secret the moment this source is. Nothing in this app currently relies on
+    # SECRET_KEY staying stable across restarts (no flask.session/CSRF use it), so a fresh
+    # random value per process is safe; set SECRET_KEY in the environment if that ever changes.
+    SECRET_KEY = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
 
     MAX_CONTENT_LENGTH = int(os.environ.get("MAX_CONTENT_LENGTH", 100 * 1024 * 1024))
     MAX_SINGLE_FILE_SIZE = int(os.environ.get("MAX_SINGLE_FILE_SIZE", 25 * 1024 * 1024))

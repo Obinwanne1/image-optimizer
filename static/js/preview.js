@@ -42,9 +42,15 @@ const Preview = (() => {
 
   let zoom = null; // null = fit to screen
 
+  function escapeHtml(s) {
+    const div = document.createElement("div");
+    div.textContent = s == null ? "" : String(s);
+    return div.innerHTML;
+  }
+
   function renderInfoList(dl, fields) {
     dl.innerHTML = Object.entries(fields)
-      .map(([k, v]) => `<div class="row"><dt>${k}</dt><dd>${v}</dd></div>`)
+      .map(([k, v]) => `<div class="row"><dt>${escapeHtml(k)}</dt><dd>${escapeHtml(v)}</dd></div>`)
       .join("");
   }
 

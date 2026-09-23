@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import shutil
 import threading
 import time
@@ -15,6 +16,19 @@ from .utils import new_id
 logger = logging.getLogger(__name__)
 
 _EXT_BY_FORMAT = {"JPEG": "jpg", "PNG": "png", "WEBP": "webp", "BMP": "bmp", "GIF": "gif"}
+
+# image_id is always a uuid4().hex from new_id() — but every public method here accepts one
+# straight from a URL path segment, and several build a filesystem path (including one fed to
+# shutil.rmtree) by joining it onto temp_dir with no other check. A value like ".." or "../.."
+# would resolve outside temp_dir entirely (verified: os.path.join(temp_dir, "..") lands on
+# temp_dir's parent), so any id that doesn't match this shape is rejected before it ever
+# touches a path.
+_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+
+
+def _validate_id(image_id: str) -> None:
+    if not _ID_RE.match(image_id or ""):
+        raise SessionNotFoundError(f"No session found for id '{image_id}'. Please upload the image again.")
 
 
 @dataclass
@@ -81,6 +95,7 @@ class SessionStore:
         return image_id
 
     def _get_entry(self, image_id: str) -> SessionEntry:
+        _validate_id(image_id)
         with self._global_lock:
             entry = self._sessions.get(image_id)
         if entry is not None:
@@ -191,6 +206,7 @@ class SessionStore:
             return dict(entry.current_settings)
 
     def delete_session(self, image_id: str) -> None:
+        _validate_id(image_id)
         with self._global_lock:
             entry = self._sessions.pop(image_id, None)
             if entry and entry.batch_id and entry.batch_id in self._batches:

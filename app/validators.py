@@ -38,6 +38,9 @@ def safe_join_within(base_dir: str, *parts: str) -> str:
     """Joins path parts under base_dir and rejects any traversal outside it."""
     candidate = os.path.normpath(os.path.join(base_dir, *parts))
     base_norm = os.path.normpath(base_dir)
-    if not candidate.startswith(base_norm):
+    # A bare startswith() would let a sibling like "<base_norm>_evil" pass, since it shares
+    # the same string prefix without being inside base_dir. commonpath forces a real
+    # ancestor relationship instead.
+    if os.path.commonpath([candidate, base_norm]) != base_norm:
         raise ValidationError("Invalid path.")
     return candidate
