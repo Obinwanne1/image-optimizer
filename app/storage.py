@@ -1,0 +1,258 @@
+import logging
+import os
+import shutil
+import threading
+import time
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional
+
+from . import background as bg_module
+from .errors import SessionNotFoundError
+from .image_processor import get_original_info
+from .settings import ImageSettings
+from .utils import new_id
+
+logger = logging.getLogger(__name__)
+
+_EXT_BY_FORMAT = {"JPEG": "jpg", "PNG": "png", "WEBP": "webp", "BMP": "bmp", "GIF": "gif"}
+
+
+@dataclass
+class SessionEntry:
+    image_id: str
+    original_filename: str
+    original_format: str
+    width: int
+    height: int
+    has_alpha: bool
+    original_size_bytes: int
+    disk_path: str
+    original_bytes: Optional[bytes]
+    current_settings: dict
+    initial_settings: dict
+    last_access: float = field(default_factory=time.time)
+    batch_id: Optional[str] = None
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    bg_removed_cache: Optional[bytes] = None
+    background_image_bytes: Optional[bytes] = None
+    background_image_filename: Optional[str] = None
+
+
+class SessionStore:
+    def __init__(self, temp_dir: str, ttl_seconds: int):
+        self.temp_dir = temp_dir
+        self.ttl_seconds = ttl_seconds
+        self._sessions: Dict[str, SessionEntry] = {}
+        self._batches: Dict[str, List[str]] = {}
+        self._global_lock = threading.Lock()
+        os.makedirs(self.temp_dir, exist_ok=True)
+
+    # -- session lifecycle -------------------------------------------------
+
+    def create_session(self, original_bytes: bytes, original_filename: str, batch_id: Optional[str] = None) -> str:
+        info = get_original_info(original_bytes)
+        image_id = new_id()
+        ext = _EXT_BY_FORMAT.get(info["format"], "bin")
+        session_dir = os.path.join(self.temp_dir, image_id)
+        os.makedirs(session_dir, exist_ok=True)
+        disk_path = os.path.join(session_dir, f"original.{ext}")
+        with open(disk_path, "wb") as f:
+            f.write(original_bytes)
+
+        defaults = ImageSettings().to_dict()
+        entry = SessionEntry(
+            image_id=image_id,
+            original_filename=original_filename or f"image.{ext}",
+            original_format=info["format"],
+            width=info["width"],
+            height=info["height"],
+            has_alpha=info["has_alpha"],
+            original_size_bytes=info["size_bytes"],
+            disk_path=disk_path,
+            original_bytes=original_bytes,
+            current_settings=defaults,
+            initial_settings=defaults,
+            batch_id=batch_id,
+        )
+        with self._global_lock:
+            self._sessions[image_id] = entry
+            if batch_id:
+                self._batches.setdefault(batch_id, []).append(image_id)
+        return image_id
+
+    def _get_entry(self, image_id: str) -> SessionEntry:
+        with self._global_lock:
+            entry = self._sessions.get(image_id)
+        if entry is not None:
+            entry.last_access = time.time()
+            return entry
+
+        # not in memory — try lazy rehydration from disk (covers cache eviction, not process restart)
+        session_dir = os.path.join(self.temp_dir, image_id)
+        if not os.path.isdir(session_dir):
+            raise SessionNotFoundError(f"No session found for id '{image_id}'. Please upload the image again.")
+        candidates = [f for f in os.listdir(session_dir) if f.startswith("original.")]
+        if not candidates:
+            raise SessionNotFoundError(f"No session found for id '{image_id}'. Please upload the image again.")
+        disk_path = os.path.join(session_dir, candidates[0])
+        with open(disk_path, "rb") as f:
+            original_bytes = f.read()
+        info = get_original_info(original_bytes)
+        defaults = ImageSettings().to_dict()
+        entry = SessionEntry(
+            image_id=image_id,
+            original_filename=f"image.{candidates[0].rsplit('.', 1)[-1]}",
+            original_format=info["format"],
+            width=info["width"],
+            height=info["height"],
+            has_alpha=info["has_alpha"],
+            original_size_bytes=info["size_bytes"],
+            disk_path=disk_path,
+            original_bytes=original_bytes,
+            current_settings=defaults,
+            initial_settings=defaults,
+        )
+        with self._global_lock:
+            self._sessions[image_id] = entry
+        os.utime(disk_path, None)
+        return entry
+
+    def get_original_bytes(self, image_id: str) -> bytes:
+        entry = self._get_entry(image_id)
+        if entry.original_bytes is not None:
+            return entry.original_bytes
+        with open(entry.disk_path, "rb") as f:
+            entry.original_bytes = f.read()
+        return entry.original_bytes
+
+    def get_working_bytes(self, image_id: str, settings: ImageSettings) -> bytes:
+        """Returns the bytes the processing pipeline should treat as its source: the true
+        original, or — when background removal is requested — a background-removed cutout
+        computed once via U2Net and cached on the session (deterministic given the same
+        original, so it's safe to reuse across every subsequent apply/reset/preset call)."""
+        if not settings.remove_background:
+            return self.get_original_bytes(image_id)
+        entry = self._get_entry(image_id)
+        with entry.lock:
+            if entry.bg_removed_cache is None:
+                original = self.get_original_bytes(image_id)
+                entry.bg_removed_cache = bg_module.remove_background_bytes(original)
+            return entry.bg_removed_cache
+
+    def set_background_image(self, image_id: str, data: bytes, filename: str) -> None:
+        entry = self._get_entry(image_id)
+        with entry.lock:
+            entry.background_image_bytes = data
+            entry.background_image_filename = filename
+
+    def get_background_image_bytes(self, image_id: str) -> Optional[bytes]:
+        entry = self._get_entry(image_id)
+        return entry.background_image_bytes
+
+    def clear_background_image(self, image_id: str) -> None:
+        entry = self._get_entry(image_id)
+        with entry.lock:
+            entry.background_image_bytes = None
+            entry.background_image_filename = None
+
+    def get_info(self, image_id: str) -> dict:
+        entry = self._get_entry(image_id)
+        return {
+            "image_id": entry.image_id,
+            "filename": entry.original_filename,
+            "format": entry.original_format,
+            "width": entry.width,
+            "height": entry.height,
+            "has_alpha": entry.has_alpha,
+            "size_bytes": entry.original_size_bytes,
+        }
+
+    def get_settings(self, image_id: str) -> dict:
+        entry = self._get_entry(image_id)
+        with entry.lock:
+            return dict(entry.current_settings)
+
+    def update_settings(self, image_id: str, settings_dict: dict) -> dict:
+        entry = self._get_entry(image_id)
+        with entry.lock:
+            entry.current_settings = dict(settings_dict)
+            return dict(entry.current_settings)
+
+    def set_initial_settings(self, image_id: str, settings_dict: dict) -> None:
+        entry = self._get_entry(image_id)
+        with entry.lock:
+            entry.initial_settings = dict(settings_dict)
+            entry.current_settings = dict(settings_dict)
+
+    def reset_settings(self, image_id: str) -> dict:
+        entry = self._get_entry(image_id)
+        with entry.lock:
+            entry.current_settings = dict(entry.initial_settings)
+            return dict(entry.current_settings)
+
+    def delete_session(self, image_id: str) -> None:
+        with self._global_lock:
+            entry = self._sessions.pop(image_id, None)
+            if entry and entry.batch_id and entry.batch_id in self._batches:
+                try:
+                    self._batches[entry.batch_id].remove(image_id)
+                except ValueError:
+                    pass
+        session_dir = os.path.join(self.temp_dir, image_id)
+        shutil.rmtree(session_dir, ignore_errors=True)
+
+    # -- batch ---------------------------------------------------------
+
+    def get_batch_members(self, batch_id: str) -> List[str]:
+        with self._global_lock:
+            members = list(self._batches.get(batch_id, []))
+        if not members:
+            raise SessionNotFoundError(f"No batch found for id '{batch_id}'.")
+        return members
+
+    def delete_batch(self, batch_id: str) -> None:
+        with self._global_lock:
+            members = self._batches.pop(batch_id, [])
+        for image_id in members:
+            self.delete_session(image_id)
+
+    # -- cleanup ---------------------------------------------------------
+
+    def cleanup_expired(self) -> None:
+        now = time.time()
+        with self._global_lock:
+            expired = [iid for iid, e in self._sessions.items() if now - e.last_access > self.ttl_seconds]
+        for image_id in expired:
+            logger.info("Purging expired session %s", image_id)
+            self.delete_session(image_id)
+
+        # also sweep orphaned disk directories (covers process-restart case where memory is empty)
+        if not os.path.isdir(self.temp_dir):
+            return
+        for name in os.listdir(self.temp_dir):
+            session_dir = os.path.join(self.temp_dir, name)
+            if not os.path.isdir(session_dir):
+                continue
+            with self._global_lock:
+                if name in self._sessions:
+                    continue
+            try:
+                mtime = os.path.getmtime(session_dir)
+            except OSError:
+                continue
+            if now - mtime > self.ttl_seconds:
+                logger.info("Purging orphaned session directory %s", name)
+                shutil.rmtree(session_dir, ignore_errors=True)
+
+    def start_cleanup_thread(self, interval_seconds: int) -> threading.Thread:
+        def _loop():
+            while True:
+                time.sleep(interval_seconds)
+                try:
+                    self.cleanup_expired()
+                except Exception:
+                    logger.exception("Error during session cleanup")
+
+        thread = threading.Thread(target=_loop, name="session-cleanup", daemon=True)
+        thread.start()
+        return thread

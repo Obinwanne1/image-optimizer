@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Image Optimizer</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+<header class="app-header">
+  <div class="brand">
+    <svg viewBox="0 0 24 24" class="brand-icon" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
+    <span>Image Optimizer</span>
+  </div>
+  <nav class="mode-tabs" role="tablist">
+    <button class="tab active" data-mode="single" role="tab">Single Image</button>
+    <button class="tab" data-mode="batch" role="tab">Batch</button>
+  </nav>
+</header>
+
+<main>
+  <!-- ============ SINGLE IMAGE MODE ============ -->
+  <section id="single-mode" class="mode-panel active">
+    <div id="upload-zone-single" class="upload-zone">
+      <input type="file" id="file-input-single" accept=".jpg,.jpeg,.png,.webp,.bmp,.gif" hidden>
+      <div class="upload-zone-content">
+        <svg viewBox="0 0 24 24" class="upload-icon" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 16V4M12 4l-4 4M12 4l4 4"/><path d="M4 16v3a2 2 0 002 2h12a2 2 0 002-2v-3"/></svg>
+        <p>Drag &amp; drop an image here, or <button type="button" id="browse-btn-single" class="link-btn">browse files</button></p>
+        <p class="hint">JPEG, PNG, WebP, BMP, GIF &mdash; up to 25MB</p>
+      </div>
+      <div class="upload-progress" id="upload-progress-single" hidden><div class="bar"></div></div>
+    </div>
+
+    <div id="editor" class="editor" hidden>
+      <div class="editor-main">
+        <div class="preview-panel">
+          <div class="preview-toolbar">
+            <div class="view-toggle" id="view-toggle">
+              <button type="button" data-view="side-by-side" class="active">Side by Side</button>
+              <button type="button" data-view="slider">Slider</button>
+            </div>
+            <div class="zoom-controls">
+              <button type="button" id="zoom-out" title="Zoom out">&minus;</button>
+              <span id="zoom-level">Fit</span>
+              <button type="button" id="zoom-in" title="Zoom in">+</button>
+              <button type="button" id="zoom-fit" title="Fit to screen">Fit</button>
+              <button type="button" id="zoom-actual" title="Actual size">100%</button>
+            </div>
+          </div>
+
+          <div class="preview-stage" id="preview-stage">
+            <div class="compare-side-by-side" id="compare-sbs">
+              <div class="compare-pane">
+                <h4>Original</h4>
+                <div class="img-wrap" id="original-img-wrap">
+                  <img id="original-img" alt="Original image">
+                  <div class="crop-box" id="crop-box" hidden>
+                    <div class="crop-handle" data-handle="n"></div>
+                    <div class="crop-handle" data-handle="s"></div>
+                    <div class="crop-handle" data-handle="e"></div>
+                    <div class="crop-handle" data-handle="w"></div>
+                    <div class="crop-handle" data-handle="nw"></div>
+                    <div class="crop-handle" data-handle="ne"></div>
+                    <div class="crop-handle" data-handle="sw"></div>
+                    <div class="crop-handle" data-handle="se"></div>
+                  </div>
+                </div>
+              </div>
+              <div class="compare-pane">
+                <h4>Optimized</h4>
+                <div class="img-wrap"><img id="optimized-img" alt="Optimized image"></div>
+              </div>
+            </div>
+
+            <div class="compare-slider" id="compare-slider" hidden>
+              <div class="slider-frame" id="slider-frame">
+                <img id="slider-original-img" alt="Original image">
+                <div class="slider-overlay" id="slider-overlay">
+                  <img id="slider-optimized-img" alt="Optimized image">
+                </div>
+                <div class="slider-line" id="slider-line"></div>
+              </div>
+              <input type="range" id="slider-range" min="0" max="100" value="50" class="slider-range-input">
+            </div>
+
+            <div class="processing-indicator" id="processing-indicator" hidden>
+              <div class="spinner"></div><span>Processing&hellip;</span>
+            </div>
+          </div>
+
+          <div class="stats-bar">
+            <div class="stat"><span class="label">Original</span><span class="value" id="stat-original-size">&mdash;</span></div>
+            <div class="stat"><span class="label">Optimized</span><span class="value" id="stat-optimized-size">&mdash;</span></div>
+            <div class="stat saved"><span class="label">Saved</span><span class="value" id="stat-saved">&mdash;</span></div>
+            <div class="stat"><span class="label">Result Size</span><span class="value" id="stat-dimensions">&mdash;</span></div>
+          </div>
+          <div id="warning-banner" class="warning-banner" hidden></div>
+        </div>
+
+        <div class="info-panel">
+          <h3>Image Information</h3>
+          <div class="info-columns">
+            <div>
+              <h4>Original</h4>
+              <dl id="info-list-original"></dl>
+            </div>
+            <div>
+              <h4>Optimized</h4>
+              <dl id="info-list-optimized"></dl>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <aside class="settings-panel">
+        <div class="settings-header">
+          <h3>Settings</h3>
+          <div class="settings-actions">
+            <button type="button" id="auto-optimize-btn" class="chip-btn">Auto-Optimize</button>
+            <button type="button" id="reset-btn" class="chip-btn">Reset</button>
+          </div>
+        </div>
+
+        <div class="control-group">
+          <label for="preset-select">Preset</label>
+          <select id="preset-select"><option value="">Custom&hellip;</option></select>
+        </div>
+
+        <div class="control-group">
+          <label for="format-select">Output Format</label>
+          <select id="format-select">
+            <option value="ORIGINAL">Keep Original</option>
+            <option value="JPEG">JPEG</option>
+            <option value="PNG">PNG</option>
+            <option value="WEBP">WebP</option>
+          </select>
+        </div>
+
+        <div class="control-group">
+          <label>Quality <span class="value-display" id="quality-value">85%</span></label>
+          <input type="range" id="quality-slider" min="1" max="100" value="85">
+          <div class="quick-buttons">
+            <button type="button" data-quality="40">Low</button>
+            <button type="button" data-quality="65">Medium</button>
+            <button type="button" data-quality="85">High</button>
+            <button type="button" data-quality="100">Maximum</button>
+          </div>
+        </div>
+
+        <details class="control-section" id="background-section" open>
+          <summary>Background</summary>
+          <label class="checkbox-row"><input type="checkbox" id="remove-background-check"> Remove Background (AI)</label>
+          <p class="hint" id="remove-background-hint">First use downloads a ~170MB model and may take a minute or two; later uses are fast (runs locally, nothing is uploaded to a third party).</p>
+
+          <div id="background-fill-group" hidden>
+            <div class="control-group">
+              <label for="background-mode-select">Replace with</label>
+              <select id="background-mode-select">
+                <option value="transparent">Transparent</option>
+                <option value="color">Solid Color</option>
+                <option value="image">Custom Image</option>
+              </select>
+            </div>
+            <div class="control-group" id="background-color-group" hidden>
+              <label>Color</label>
+              <input type="color" id="background-color-input" value="#ffffff">
+            </div>
+            <div class="control-group" id="background-image-upload-group" hidden>
+              <input type="file" id="background-image-input" accept=".jpg,.jpeg,.png,.webp,.bmp,.gif" hidden>
+              <button type="button" id="background-image-browse-btn" class="secondary-btn full-width">Upload Background Image</button>
+              <p class="hint" id="background-image-status">No image uploaded &mdash; falls back to transparent.</p>
+              <button type="button" id="background-image-clear-btn" class="chip-btn" hidden>Remove Background Image</button>
+            </div>
+          </div>
+        </details>
+
+        <details class="control-section" open>
+          <summary>Adjustments</summary>
+          <div class="control-group"><label>Brightness <span class="value-display" id="brightness-value">1.00</span></label><input type="range" id="brightness-slider" min="0" max="3" step="0.05" value="1"></div>
+          <div class="control-group"><label>Contrast <span class="value-display" id="contrast-value">1.00</span></label><input type="range" id="contrast-slider" min="0" max="3" step="0.05" value="1"></div>
+          <div class="control-group"><label>Saturation <span class="value-display" id="saturation-value">1.00</span></label><input type="range" id="saturation-slider" min="0" max="3" step="0.05" value="1"></div>
+          <div class="control-group"><label>Exposure <span class="value-display" id="exposure-value">0</span></label><input type="range" id="exposure-slider" min="-100" max="100" step="1" value="0"></div>
+          <label class="checkbox-row"><input type="checkbox" id="grayscale-check"> Grayscale</label>
+        </details>
+
+        <details class="control-section">
+          <summary>Sharpen &amp; Blur</summary>
+          <div class="control-group"><label>Sharpen Amount <span class="value-display" id="sharpen-value">0</span></label><input type="range" id="sharpen-slider" min="0" max="500" step="5" value="0"></div>
+          <div class="control-group"><label>Sharpen Radius <span class="value-display" id="sharpen-radius-value">2.0</span></label><input type="range" id="sharpen-radius-slider" min="0.1" max="10" step="0.1" value="2"></div>
+          <div class="control-group"><label>Blur <span class="value-display" id="blur-value">0</span></label><input type="range" id="blur-slider" min="0" max="20" step="0.5" value="0"></div>
+        </details>
+
+        <details class="control-section">
+          <summary>Rotate &amp; Flip</summary>
+          <div class="button-row">
+            <button type="button" id="rotate-left-btn">&#8634; Rotate Left</button>
+            <button type="button" id="rotate-right-btn">&#8635; Rotate Right</button>
+          </div>
+          <div class="button-row">
+            <button type="button" id="flip-h-btn" class="toggle-btn">&#8596; Flip Horizontal</button>
+            <button type="button" id="flip-v-btn" class="toggle-btn">&#8597; Flip Vertical</button>
+          </div>
+        </details>
+
+        <details class="control-section">
+          <summary>Resize</summary>
+          <div class="control-group">
+            <label for="resize-mode-select">Mode</label>
+            <select id="resize-mode-select">
+              <option value="none">None (original size)</option>
+              <option value="percentage">Percentage</option>
+              <option value="dimensions">Width / Height</option>
+              <option value="crop">Crop (cut to selection)</option>
+            </select>
+          </div>
+          <div class="control-group" id="resize-percentage-group" hidden>
+            <label>Scale <span class="value-display" id="resize-percentage-value">100%</span></label>
+            <input type="range" id="resize-percentage-slider" min="1" max="500" value="100">
+          </div>
+          <div class="control-group dims-group" id="resize-dims-group" hidden>
+            <div class="dims-row">
+              <label>W <input type="number" id="resize-width-input" min="1" max="8000" placeholder="width"></label>
+              <label>H <input type="number" id="resize-height-input" min="1" max="8000" placeholder="height"></label>
+            </div>
+            <label class="checkbox-row"><input type="checkbox" id="maintain-aspect-check" checked> Maintain aspect ratio</label>
+          </div>
+          <div class="preset-dims" id="preset-dims-group" hidden>
+            <button type="button" data-w="1920" data-h="1080">1920&times;1080</button>
+            <button type="button" data-w="1080" data-h="1080">1080&times;1080</button>
+            <button type="button" data-w="800" data-h="600">800&times;600</button>
+            <button type="button" data-w="400" data-h="400">400&times;400</button>
+          </div>
+
+          <div class="control-group dims-group" id="resize-crop-group" hidden>
+            <div class="preset-dims" id="crop-aspect-buttons">
+              <button type="button" data-ratio="" class="active">Free</button>
+              <button type="button" data-ratio="1">1:1</button>
+              <button type="button" data-ratio="1.3333">4:3</button>
+              <button type="button" data-ratio="0.75">3:4</button>
+              <button type="button" data-ratio="1.7778">16:9</button>
+              <button type="button" data-ratio="0.5625">9:16</button>
+            </div>
+            <div class="dims-row">
+              <label>X <input type="number" id="crop-x-input" min="0"></label>
+              <label>Y <input type="number" id="crop-y-input" min="0"></label>
+            </div>
+            <div class="dims-row">
+              <label>W <input type="number" id="crop-width-input" min="1"></label>
+              <label>H <input type="number" id="crop-height-input" min="1"></label>
+            </div>
+            <button type="button" id="crop-reset-btn" class="chip-btn">Reset Crop to Full Image</button>
+            <p class="hint">Drag the box on the Original preview to position and resize the crop area.</p>
+          </div>
+
+          <p class="dims-readout">Original: <span id="original-dims-readout">&mdash;</span> &rarr; Result: <span id="result-dims-readout">&mdash;</span></p>
+        </details>
+
+        <details class="control-section">
+          <summary>Optimization</summary>
+          <label class="checkbox-row"><input type="checkbox" id="strip-metadata-check" checked> Remove metadata (EXIF)</label>
+          <label class="checkbox-row"><input type="checkbox" id="progressive-check" checked> Progressive JPEG</label>
+          <label class="checkbox-row"><input type="checkbox" id="lossless-check"> Lossless WebP</label>
+          <div class="control-group" id="webp-method-group">
+            <label>WebP Effort <span class="value-display" id="webp-method-value">4</span></label>
+            <input type="range" id="webp-method-slider" min="0" max="6" value="4">
+          </div>
+        </details>
+
+        <div class="settings-footer">
+          <button type="button" id="new-upload-btn" class="secondary-btn">New Upload</button>
+          <div class="download-row">
+            <input type="text" id="download-filename-input" placeholder="filename (optional)">
+            <button type="button" id="download-btn" class="primary-btn">Download</button>
+          </div>
+        </div>
+      </aside>
+    </div>
+  </section>
+
+  <!-- ============ BATCH MODE ============ -->
+  <section id="batch-mode" class="mode-panel">
+    <div id="upload-zone-batch" class="upload-zone">
+      <input type="file" id="file-input-batch" accept=".jpg,.jpeg,.png,.webp,.bmp,.gif" multiple hidden>
+      <div class="upload-zone-content">
+        <svg viewBox="0 0 24 24" class="upload-icon" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 16V4M12 4l-4 4M12 4l4 4"/><path d="M4 16v3a2 2 0 002 2h12a2 2 0 002-2v-3"/></svg>
+        <p>Drag &amp; drop multiple images here, or <button type="button" id="browse-btn-batch" class="link-btn">browse files</button></p>
+        <p class="hint">Up to 30 images, 25MB each</p>
+      </div>
+      <div class="upload-progress" id="upload-progress-batch" hidden><div class="bar"></div></div>
+    </div>
+
+    <div id="batch-editor" class="batch-editor" hidden>
+      <aside class="settings-panel batch-settings-panel">
+        <div class="settings-header"><h3>Shared Settings</h3></div>
+
+        <div class="control-group">
+          <label for="batch-preset-select">Preset</label>
+          <select id="batch-preset-select"><option value="">Custom&hellip;</option></select>
+        </div>
+        <div class="control-group">
+          <label for="batch-format-select">Output Format</label>
+          <select id="batch-format-select">
+            <option value="ORIGINAL">Keep Original</option>
+            <option value="JPEG">JPEG</option>
+            <option value="PNG">PNG</option>
+            <option value="WEBP">WebP</option>
+          </select>
+        </div>
+        <div class="control-group">
+          <label>Quality <span class="value-display" id="batch-quality-value">85%</span></label>
+          <input type="range" id="batch-quality-slider" min="1" max="100" value="85">
+        </div>
+        <label class="checkbox-row"><input type="checkbox" id="batch-strip-metadata-check" checked> Remove metadata (EXIF)</label>
+
+        <div class="settings-footer">
+          <button type="button" id="batch-apply-btn" class="primary-btn full-width">Apply to All</button>
+          <button type="button" id="batch-download-zip-btn" class="secondary-btn full-width">Download All (ZIP)</button>
+          <button type="button" id="batch-new-upload-btn" class="secondary-btn full-width">New Batch</button>
+        </div>
+      </aside>
+
+      <div class="batch-table-wrap">
+        <table class="batch-table">
+          <thead>
+            <tr><th>Preview</th><th>Filename</th><th>Status</th><th>Original</th><th>Optimized</th><th>Saved</th><th></th></tr>
+          </thead>
+          <tbody id="batch-table-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+</main>
+
+<div id="toast-container" class="toast-container"></div>
+
+<script src="{{ url_for('static', filename='js/api.js') }}"></script>
+<script src="{{ url_for('static', filename='js/crop.js') }}"></script>
+<script src="{{ url_for('static', filename='js/settings.js') }}"></script>
+<script src="{{ url_for('static', filename='js/preview.js') }}"></script>
+<script src="{{ url_for('static', filename='js/upload.js') }}"></script>
+<script src="{{ url_for('static', filename='js/batch.js') }}"></script>
+<script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html>
