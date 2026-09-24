@@ -41,6 +41,13 @@ def create_app(config_class=Config):
     def health():
         return {"status": "ok"}
 
+    @app.after_request
+    def _set_security_headers(response):
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Content-Security-Policy", "default-src 'self'")
+        return response
+
     return app
 
 

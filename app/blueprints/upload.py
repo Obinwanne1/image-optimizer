@@ -14,9 +14,9 @@ def _handle_single_upload(store, file_storage, max_single_size, allowed_extensio
     validate_extension(file_storage.filename, allowed_extensions)
     data = file_storage.read()
     validate_file_size(data, max_single_size)
-    validate_and_probe_image(data, allowed_formats, max_dim)
+    info = validate_and_probe_image(data, allowed_formats, max_dim)
 
-    image_id = store.create_session(data, file_storage.filename, batch_id=batch_id)
+    image_id = store.create_session(data, file_storage.filename, batch_id=batch_id, info=info)
     info = store.get_info(image_id)
     settings = suggest_settings(info)
     store.set_initial_settings(image_id, settings.to_dict())

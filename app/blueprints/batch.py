@@ -1,4 +1,4 @@
-import io
+import tempfile
 import zipfile
 
 from flask import Blueprint, current_app, jsonify, request, send_file
@@ -64,7 +64,10 @@ def batch_download_zip():
         raise ValidationError("'batch_id' is required.")
 
     member_ids = store.get_batch_members(batch_id)
-    zip_buffer = io.BytesIO()
+    # Spools to disk past 10MB instead of holding the whole archive resident in memory --
+    # up to MAX_BATCH_FILES members at MAX_SINGLE_FILE_SIZE output each could otherwise pin
+    # hundreds of MB per request, uncounted by SessionStore's own byte budget.
+    zip_buffer = tempfile.SpooledTemporaryFile(max_size=10 * 1024 * 1024)
     errors = []
     used_names = set()
 

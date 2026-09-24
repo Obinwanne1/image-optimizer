@@ -225,7 +225,7 @@ def apply_settings(
         img = img.convert("RGB")
 
     exif_for_save = None
-    if not settings.strip_metadata and exif_bytes and target_format in ("JPEG", "WEBP"):
+    if not settings.strip_metadata and exif_bytes and target_format in ("JPEG", "WEBP", "PNG"):
         try:
             exif_dict = piexif.load(exif_bytes)
             exif_dict["0th"][piexif.ImageIFD.Orientation] = 1
@@ -240,6 +240,8 @@ def apply_settings(
             save_kwargs["exif"] = exif_for_save
     elif target_format == "PNG":
         save_kwargs.update(optimize=True)
+        if exif_for_save:
+            save_kwargs["exif"] = exif_for_save
     elif target_format == "WEBP":
         save_kwargs.update(quality=settings.quality, method=settings.webp_method, lossless=settings.lossless)
         if exif_for_save:

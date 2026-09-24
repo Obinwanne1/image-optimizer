@@ -11,6 +11,7 @@ from .errors import SessionNotFoundError, ValidationError
 from .image_processor import get_original_info
 from .settings import ImageSettings
 from .utils import new_id
+from .validators import safe_join_within
 
 logger = logging.getLogger(__name__)
 
@@ -18,10 +19,11 @@ _EXT_BY_FORMAT = {"JPEG": "jpg", "PNG": "png", "WEBP": "webp", "BMP": "bmp", "GI
 
 # image_id is always a uuid4().hex from new_id() — but every public method here accepts one
 # straight from a URL path segment, and several build a filesystem path (including one fed to
-# shutil.rmtree) by joining it onto temp_dir with no other check. A value like ".." or "../.."
-# would resolve outside temp_dir entirely (verified: os.path.join(temp_dir, "..") lands on
-# temp_dir's parent), so any id that doesn't match this shape is rejected before it ever
-# touches a path.
+# shutil.rmtree) by joining it onto temp_dir. A value like ".." or "../.." would resolve outside
+# temp_dir entirely (verified: os.path.join(temp_dir, "..") lands on temp_dir's parent), so any
+# id that doesn't match this shape is rejected before it ever touches a path. safe_join_within()
+# (below, at every session_dir construction site) is a second, independent layer on top of this
+# regex check — belt-and-suspenders, not a replacement for it.
 _ID_RE = re.compile(r"^[0-9a-f]{32}$")
 
 
@@ -103,8 +105,11 @@ class SessionStore:
 
     # -- session lifecycle -------------------------------------------------
 
-    def create_session(self, original_bytes: bytes, original_filename: str, batch_id: Optional[str] = None) -> str:
-        info = get_original_info(original_bytes)
+    def create_session(self, original_bytes: bytes, original_filename: str,
+                        batch_id: Optional[str] = None, info: Optional[dict] = None) -> str:
+        # Callers that already probed the image (validate_and_probe_image) should pass its
+        # returned info dict here instead of letting this decode+verify+reopen+load run twice.
+        info = info or get_original_info(original_bytes)
 
         with self._global_lock:
             if self.max_total_bytes is not None and self._total_bytes + len(original_bytes) > self.max_total_bytes:
@@ -113,13 +118,20 @@ class SessionStore:
                 )
             self._total_bytes += len(original_bytes)
 
-        image_id = new_id()
-        ext = _EXT_BY_FORMAT.get(info["format"], "bin")
-        session_dir = os.path.join(self.temp_dir, image_id)
-        os.makedirs(session_dir, exist_ok=True)
-        disk_path = os.path.join(session_dir, f"original.{ext}")
-        with open(disk_path, "wb") as f:
-            f.write(original_bytes)
+        try:
+            image_id = new_id()
+            ext = _EXT_BY_FORMAT.get(info["format"], "bin")
+            session_dir = safe_join_within(self.temp_dir, image_id)
+            os.makedirs(session_dir, exist_ok=True)
+            disk_path = os.path.join(session_dir, f"original.{ext}")
+            with open(disk_path, "wb") as f:
+                f.write(original_bytes)
+        except Exception:
+            # Roll back the budget charge -- nothing was actually retained if disk I/O failed,
+            # so counting these bytes forever would permanently shrink the available budget.
+            with self._global_lock:
+                self._total_bytes = max(0, self._total_bytes - len(original_bytes))
+            raise
 
         defaults = ImageSettings().to_dict()
         entry = SessionEntry(
@@ -151,7 +163,7 @@ class SessionStore:
             return entry
 
         # not in memory — try lazy rehydration from disk (covers cache eviction, not process restart)
-        session_dir = os.path.join(self.temp_dir, image_id)
+        session_dir = safe_join_within(self.temp_dir, image_id)
         if not os.path.isdir(session_dir):
             raise SessionNotFoundError(f"No session found for id '{image_id}'. Please upload the image again.")
         candidates = [f for f in os.listdir(session_dir) if f.startswith("original.")]
@@ -265,7 +277,7 @@ class SessionStore:
                 self._total_bytes = max(0, self._total_bytes - len(entry.original_bytes))
         if entry:
             self._batch_registry.remove_member(image_id, entry.batch_id)
-        session_dir = os.path.join(self.temp_dir, image_id)
+        session_dir = safe_join_within(self.temp_dir, image_id)
         shutil.rmtree(session_dir, ignore_errors=True)
 
     # -- batch ---------------------------------------------------------

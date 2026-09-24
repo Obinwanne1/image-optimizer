@@ -24,3 +24,8 @@ jobs:
 
       - name: Run tests
         run: python -m pytest -q
+
+      - name: Dependency vulnerability scan
+        run: |
+          pip install pip-audit
+          pip-audit -r requirements.txt

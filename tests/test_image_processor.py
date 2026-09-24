@@ -1,9 +1,18 @@
 import io
 
+import piexif
 from PIL import Image
 
 from app.image_processor import apply_settings, get_original_info
 from app.settings import ImageSettings
+
+
+def _jpeg_bytes_with_exif():
+    img = Image.new("RGB", (100, 80), (200, 60, 60))
+    exif_bytes = piexif.dump({"0th": {piexif.ImageIFD.Make: b"TestMake"}})
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", exif=exif_bytes)
+    return buf.getvalue()
 
 
 def test_get_original_info_reports_dimensions_and_format(rgb_png_bytes):
@@ -62,3 +71,17 @@ def test_apply_settings_rotate_90_swaps_dimensions(rgb_png_bytes):
     _output_bytes, stats, _warnings = apply_settings(rgb_png_bytes, settings, original_format_hint="PNG")
     assert stats["width"] == 80
     assert stats["height"] == 100
+
+
+def test_apply_settings_preserves_exif_in_png_output_when_not_stripped():
+    settings = ImageSettings.from_dict({"format": "PNG", "strip_metadata": False})
+    output_bytes, _stats, _warnings = apply_settings(_jpeg_bytes_with_exif(), settings, original_format_hint="JPEG")
+    out_img = Image.open(io.BytesIO(output_bytes))
+    assert "exif" in out_img.info
+
+
+def test_apply_settings_strips_exif_from_png_output_by_default():
+    settings = ImageSettings.from_dict({"format": "PNG"})  # strip_metadata defaults to True
+    output_bytes, _stats, _warnings = apply_settings(_jpeg_bytes_with_exif(), settings, original_format_hint="JPEG")
+    out_img = Image.open(io.BytesIO(output_bytes))
+    assert "exif" not in out_img.info
