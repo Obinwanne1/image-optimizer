@@ -30,6 +30,41 @@ def _validate_id(image_id: str) -> None:
         raise SessionNotFoundError(f"No session found for id '{image_id}'. Please upload the image again.")
 
 
+class BatchRegistry:
+    """Tracks which image_ids belong to which batch_id. Kept separate from SessionStore's own
+    session-lifecycle bookkeeping (disk I/O, the total-byte budget, TTL expiry) because batch
+    membership is a distinct concern — grouping already-independent sessions together — that
+    doesn't need a SessionEntry or the session lock at all, only its own small lock over its own
+    dict."""
+
+    def __init__(self):
+        self._batches: Dict[str, List[str]] = {}
+        self._lock = threading.Lock()
+
+    def add_member(self, batch_id: str, image_id: str) -> None:
+        with self._lock:
+            self._batches.setdefault(batch_id, []).append(image_id)
+
+    def remove_member(self, image_id: str, batch_id: Optional[str]) -> None:
+        if not batch_id:
+            return
+        with self._lock:
+            members = self._batches.get(batch_id)
+            if members:
+                try:
+                    members.remove(image_id)
+                except ValueError:
+                    pass
+
+    def get_members(self, batch_id: str) -> List[str]:
+        with self._lock:
+            return list(self._batches.get(batch_id, []))
+
+    def pop_members(self, batch_id: str) -> List[str]:
+        with self._lock:
+            return self._batches.pop(batch_id, [])
+
+
 @dataclass
 class SessionEntry:
     image_id: str
@@ -61,7 +96,7 @@ class SessionStore:
         # cap a single request, not cumulative retention. None disables the cap (unbounded).
         self.max_total_bytes = max_total_bytes
         self._sessions: Dict[str, SessionEntry] = {}
-        self._batches: Dict[str, List[str]] = {}
+        self._batch_registry = BatchRegistry()
         self._global_lock = threading.Lock()
         self._total_bytes = 0
         os.makedirs(self.temp_dir, exist_ok=True)
@@ -103,8 +138,8 @@ class SessionStore:
         )
         with self._global_lock:
             self._sessions[image_id] = entry
-            if batch_id:
-                self._batches.setdefault(batch_id, []).append(image_id)
+        if batch_id:
+            self._batch_registry.add_member(batch_id, image_id)
         return image_id
 
     def _get_entry(self, image_id: str) -> SessionEntry:
@@ -228,26 +263,24 @@ class SessionStore:
             entry = self._sessions.pop(image_id, None)
             if entry and entry.original_bytes is not None:
                 self._total_bytes = max(0, self._total_bytes - len(entry.original_bytes))
-            if entry and entry.batch_id and entry.batch_id in self._batches:
-                try:
-                    self._batches[entry.batch_id].remove(image_id)
-                except ValueError:
-                    pass
+        if entry:
+            self._batch_registry.remove_member(image_id, entry.batch_id)
         session_dir = os.path.join(self.temp_dir, image_id)
         shutil.rmtree(session_dir, ignore_errors=True)
 
     # -- batch ---------------------------------------------------------
+    # Membership tracking itself lives in BatchRegistry (see above) — these two methods are a
+    # thin pass-through that adds the one behavior specific to SessionStore's own domain: turning
+    # "no members" into the same SessionNotFoundError callers already expect for a missing image.
 
     def get_batch_members(self, batch_id: str) -> List[str]:
-        with self._global_lock:
-            members = list(self._batches.get(batch_id, []))
+        members = self._batch_registry.get_members(batch_id)
         if not members:
             raise SessionNotFoundError(f"No batch found for id '{batch_id}'.")
         return members
 
     def delete_batch(self, batch_id: str) -> None:
-        with self._global_lock:
-            members = self._batches.pop(batch_id, [])
+        members = self._batch_registry.pop_members(batch_id)
         for image_id in members:
             self.delete_session(image_id)
 

@@ -59,11 +59,19 @@ _session_lock = threading.Lock()
 # the Flask process (request handling, Pillow encode/decode) under concurrent load.
 _INFERENCE_CONCURRENCY = max(1, (os.cpu_count() or 2) // 2)
 _inference_semaphore = threading.Semaphore(_INFERENCE_CONCURRENCY)
+# How long a request waits for an inference slot before giving up and returning 503 instead of
+# queueing indefinitely behind a burst of concurrent background-removal requests.
+_INFERENCE_WAIT_TIMEOUT_SECONDS = 30
 
 
 class BackgroundRemovalError(AppError):
     status_code = 500
     code = "background_removal_failed"
+
+
+class BackgroundRemovalBusyError(AppError):
+    status_code = 503
+    code = "background_removal_busy"
 
 
 def _ensure_model() -> str:
@@ -184,8 +192,14 @@ def _predict_mask(rgb_img: Image.Image) -> Image.Image:
     tensor = normalized.transpose((2, 0, 1))[None].astype(np.float32)
 
     input_name = session.get_inputs()[0].name
-    with _inference_semaphore:
+    if not _inference_semaphore.acquire(timeout=_INFERENCE_WAIT_TIMEOUT_SECONDS):
+        raise BackgroundRemovalBusyError(
+            "Background removal is busy handling other requests right now. Try again shortly."
+        )
+    try:
         outputs = session.run(None, {input_name: tensor})
+    finally:
+        _inference_semaphore.release()
     pred = outputs[0][:, 0, :, :]
     lo, hi = float(pred.min()), float(pred.max())
     pred = (pred - lo) / max(hi - lo, 1e-6)

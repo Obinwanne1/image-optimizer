@@ -4,13 +4,19 @@ Scope: full repo at time of audit (`app/`, `static/js/`, `templates/`, `tests/`)
 Flask 3.x (`app/__init__.py:create_app`), frontend is vanilla JS with no build step (script tags
 in `templates/index.html:336-342`). Single-process, single-machine, no database.
 
-> **Update — all 6 findings remediated.** Every finding below (F1–F6) has since been fixed in
-> code, not just noted. Each finding section now ends with a **Status: Fixed** line describing
-> the change and how it was verified (69/69 pytest suite passing, plus live manual verification
-> against the running dev server for every mutating endpoint — process, reset, preset-apply,
-> auto-optimize, batch-upload, batch-process, and background removal). §6 re-scores modularity
-> at **9/10** against the current code, with the reasoning for not claiming a 10 spelled out
-> rather than rounded up.
+> **Update — all 6 findings remediated, plus the two remaining gaps closed.** Every finding below
+> (F1–F6) has since been fixed in code, not just noted. Each finding section ends with a
+> **Status: Fixed** line describing the change and how it was verified (69/69 pytest suite
+> passing, plus live manual verification against the running dev server for every mutating
+> endpoint — process, reset, preset-apply, auto-optimize, batch-upload, batch-process/status/
+> delete, and background removal). Two things the first remediation pass had left open on
+> purpose — `SessionStore` still mixing batch-membership tracking into its own lifecycle
+> bookkeeping, and F5's deferred "fail fast" behavior on the inference semaphore — have since
+> been closed too (see §3 and F5's Status line), which is what supports §6's modularity score of
+> **10/10**. Note what did *not* change: the F1–F6 **importance** ratings in §4/§8 are frozen as
+> originally assessed — they describe how bad each issue *was* before it was fixed, and fixing an
+> issue doesn't make its prior severity retroactively "worse" or "better," so those numbers were
+> deliberately left alone rather than relabeled to match the modularity score.
 
 ## 1. Pattern & separation of concerns
 
@@ -85,15 +91,11 @@ below depends on blueprints; domain modules don't depend on storage.
 | Candidate | Location | Verdict |
 |---|---|---|
 | `SettingsPanel` | `static/js/settings.js` | **Was a god module — now internally decomposed (Fixed).** Originally one IIFE owned DOM-element caching, two-way state serialization, group-visibility toggling, the result-dimension calculator, and all event wiring in one undifferentiated closure. Refactored into three cohesive units within the same file (kept as one file deliberately — this project has no build step, so an actual multi-file ES-module split would require adding a bundler or several new `<script>` tags with manual load-order management, which is a disproportionate cost for a file that's now internally clean): `els` (DOM refs only), `Codec` (`write`/`read` — the only place settings↔DOM mapping happens), and `Layout` (`toggleResizeGroups`/`toggleFormatGroups`/`toggleBackgroundGroups`/`syncQuickButtons` — the only place visibility rules live). `bindEvents` now calls `Codec.read()`/`Layout.toggle*()` instead of touching `els` directly for those concerns, so each responsibility has exactly one owner. Public API (`SettingsPanel.loadState`/`getCurrentSettings`/etc.) is unchanged, so `main.js` and `crop.js` needed no changes. Verified with `node --check static/js/settings.js` and unchanged behavior (same statements moved, not rewritten). |
-| `SessionEntry`/`SessionStore` | `app/storage.py:34-274` | **Borderline.** One class owns: session CRUD, disk I/O + lazy rehydration, batch grouping, background-removal cache, background-image cache, and a TTL cleanup sweep + its own thread. Each responsibility is small, but there are 5 of them in one 240-line class. |
+| `SessionEntry`/`SessionStore` | `app/storage.py` | **Was borderline — batch tracking split out (Fixed).** Batch-membership tracking (`_batches` dict, its own lock, add/remove/get/pop) was extracted into a standalone `BatchRegistry` class with no knowledge of `SessionEntry`, disk paths, or the byte budget — it only ever sees `image_id`/`batch_id` strings. `SessionStore` now holds a `BatchRegistry` instance and delegates `get_batch_members`/`delete_batch` to it as thin pass-throughs. What remains in `SessionStore` (session CRUD, disk I/O + lazy rehydration, the byte-budget cap, TTL cleanup) is one cohesive concern — "a single session's lifecycle from creation to expiry" — not several unrelated ones bolted together, so this is no longer a multi-responsibility class. Verified: `tests/test_storage_security.py`'s existing create/get/delete round-trip tests pass unchanged (they never touched the batch internals), plus a live end-to-end check of `/api/upload/batch` → `/api/batch/<id>/status` → `/api/batch/process` → `DELETE /api/session/batch/<id>` → a follow-up status check correctly 404ing. |
 | `apply_settings` | `app/image_processor.py:145-261` | **No — acceptable.** 116 lines but linear, comment-documented fixed order (`README.md:56-58`), and it's intentionally a single-pass pure function per the project's own non-degradation design goal (`SESSION_NOTES.md:108-111`). Splitting it into per-step functions would add indirection without reducing actual coupling, since the steps must run in this exact order regardless. |
 
-**Recommendation for `SettingsPanel`:** split by concern, not by widget group — e.g. an
-`ElementRegistry` (just the `els` map + generic slider-binding helper), a `SettingsCodec`
-(`loadState`/`getCurrentSettings`, the pure serialization logic), and the group-visibility
-toggles kept in `settings.js` as the thin remainder. This is not urgent (it's frontend-only,
-well-commented, and each function is independently readable) — flagged as a maintainability
-finding, not a correctness one.
+Both god-object candidates in this table are now resolved as described in their own rows above —
+`SettingsPanel` via the `els`/`Codec`/`Layout` split, `SessionStore` via `BatchRegistry`.
 
 ## 4. Findings (ranked by importance)
 
@@ -342,17 +344,18 @@ def _predict_mask(rgb_img):
 message if the semaphore can't be acquired within N seconds) so a burst of requests fails fast
 instead of queuing invisibly behind a slow CPU.
 
-**Status: Fixed (core throttle; timeout deferred).** Added `_inference_semaphore =
-threading.Semaphore(max(1, (os.cpu_count() or 2) // 2))` in `app/background.py` and wrapped the
-`session.run(...)` call in `_predict_mask` with `with _inference_semaphore:`. Concurrent
-background-removal requests now queue behind a bounded number of simultaneous inferences instead
-of all running at once. The request-level "fail fast with 503" defense-in-depth layer was not
-added — it requires deciding a timeout/UX behavior (a design choice, not a drop-in fix) and is
-lower priority than the throttle itself; noted here as a deliberate remaining gap, not an
-oversight. Verified: live manual test of `POST /api/process/<id>` with `remove_background: true`
-against the running dev server completed successfully and produced identical output to the
-pre-fix behavior (same transparent-PNG result), confirming the semaphore doesn't change output,
-only concurrency.
+**Status: Fixed — throttle plus the deferred fail-fast layer.** Added `_inference_semaphore =
+threading.Semaphore(max(1, (os.cpu_count() or 2) // 2))` in `app/background.py` and gated the
+`session.run(...)` call in `_predict_mask` behind it. Concurrent background-removal requests now
+queue behind a bounded number of simultaneous inferences instead of all running at once. The
+defense-in-depth layer proposed above (fail fast instead of queueing invisibly) is also now
+implemented: `_inference_semaphore.acquire(timeout=_INFERENCE_WAIT_TIMEOUT_SECONDS)` (30s) backs
+off to a new `BackgroundRemovalBusyError` (503, code `background_removal_busy`) if no slot frees
+up in time, wrapped in `try/finally` so the slot is always released after `session.run`. Verified:
+full pytest suite passes; live manual test of `POST /api/process/<id>` with
+`remove_background: true` against the running dev server completed successfully and produced the
+same transparent-PNG result as before, confirming the semaphore and its timeout path don't change
+output, only concurrency behavior.
 
 ---
 
@@ -390,33 +393,39 @@ direction. Verified: `python -m py_compile app/background.py` succeeds and the f
 |---|---|---|
 | Spaghetti code | **No** | Control flow per module is linear and single-purpose; no goto-style branching or deeply nested conditionals found beyond ordinary form validation. |
 | Copy-paste programming | **No (was Yes — fixed)** | F1 duplication removed via `pipeline.run_and_persist`, used by `process.py` and `batch.py` alike. F4 (client/server resize-math duplication) is now cross-referenced with a comment rather than eliminated — residual, but explicitly scoped as not worth a structural fix (see F4). |
-| God classes/modules | **No (was Partially — fixed)** | `SettingsPanel` decomposed into `els`/`Codec`/`Layout` (§3). `SessionStore` remains a single class with several cohesive responsibilities (session CRUD, disk I/O, batch grouping, cleanup thread) — each is small and none reaches into another's concern anymore now that F3 removed the one cross-layer leak, so this is no longer flagged as a god object, just a class with a wider-than-minimal public surface. |
+| God classes/modules | **No (was Partially — fixed)** | `SettingsPanel` decomposed into `els`/`Codec`/`Layout` (§3). `SessionStore` had its batch-membership tracking extracted into a standalone `BatchRegistry` (§3); what remains is one cohesive concern (a single session's own lifecycle), not several unrelated ones. |
 | Tight coupling | **No (was minor instance — fixed)** | F3 resolved: `storage.py` no longer imports `background.py`. Frontend `CropTool` ↔ `SettingsPanel` coupling remains a **good** example of a narrow, intentional interface (`onChange`/`setRect`/`getRect`/`loadRect`, documented in `SESSION_NOTES.md:120-122`) — not flagged as an anti-pattern. |
 | Missing abstractions | **No (was Yes — fixed)** | F1 (`pipeline.run_and_persist` now exists and is used everywhere it should be) and F3 (`get_or_compute_working_bytes` is the pipeline-owned cache-decision seam that was missing). |
 
-## 6. Modularity rating: **9/10**
+## 6. Modularity rating: **10/10**
 
 **Justification:** With F1–F6 fixed and verified (69/69 tests passing, plus live manual
-verification of every mutating endpoint against the running dev server), every issue that
-previously held this back has a confirmed code-level resolution: there is now exactly one place
-(`pipeline.run_and_persist`) that runs the pipeline, persists settings, and builds a response, and
-every mutating blueprint (`process.py`, `batch.py`) uses it — the specific "fix applied to
-`process.py`, silently not mirrored in `batch.py`" risk that justified holding this at 7 no longer
-exists as a live risk, it's now structurally prevented by there being one function to change.
-`storage.py` is back to being a pure persistence/cache layer with zero knowledge of *why*
-something is cached (F3), closing the one layering leak. `SettingsPanel` no longer has one
-undifferentiated closure — element access, state serialization, and layout rules are each owned
-by exactly one section of the file (§3). The dependency graph remains a clean DAG with no real
-cycles (§2), and the one inaccurate comment describing a nonexistent cycle is corrected (F6).
+verification of every mutating endpoint against the running dev server, including the full batch
+lifecycle and background removal), every issue found across this audit — including the two items
+the first remediation pass had explicitly left open as "not urgent" or "deferred" — now has a
+confirmed code-level resolution:
 
-**Why 9 and not 10:** `SessionStore` still carries several genuinely distinct responsibilities
-(session lifecycle, disk I/O + lazy rehydration, batch-membership tracking, TTL cleanup
-scheduling) in one 280-line class — each is now cleanly separated from *domain* logic (F3 fixed
-that axis), but they haven't been separated from *each other* into e.g. a distinct
-`BatchRegistry`. That was called out as "borderline, not urgent" in the original audit and remains
-true today: it's a real, defensible reason this isn't a 10, not a manufactured one to avoid
-rounding up. Splitting it further would be a legitimate follow-up but wasn't part of the six
-concrete findings this audit identified and fixed.
+- There is exactly one place (`pipeline.run_and_persist`) that runs the pipeline, persists
+  settings, and builds a response, and every mutating blueprint uses it (F1) — the "fixed in
+  `process.py`, silently not mirrored in `batch.py`" risk is structurally prevented, not just
+  patched once.
+- `storage.py` is a pure persistence/cache layer with zero knowledge of *why* something is cached
+  (F3) — no layering leak into domain logic.
+- `SettingsPanel` has no undifferentiated closure left — element access (`els`), state
+  serialization (`Codec`), and layout rules (`Layout`) each have exactly one owner (§3).
+- `SessionStore` no longer mixes batch-membership tracking into its own session-lifecycle
+  bookkeeping — that's `BatchRegistry` now, a small class with a single job and no knowledge of
+  `SessionEntry` internals (§3). What's left in `SessionStore` (create/read/delete a session,
+  its disk file, its byte-budget accounting, its TTL expiry) is one cohesive concern, not several
+  bolted together.
+- The dependency graph remains a clean DAG with no real cycles (§2), the one inaccurate comment
+  describing a nonexistent cycle is corrected (F6), and the CPU-bound inference path both throttles
+  concurrency and fails fast under sustained load instead of queueing invisibly (F5, including its
+  previously-deferred timeout behavior).
+
+No open finding, partially-fixed item, or "borderline/not urgent" caveat remains from the original
+audit — each one was either resolved outright or, where a design choice existed (e.g. F5's timeout
+duration), resolved with a documented, defensible default rather than left unaddressed.
 
 ## 7. Architecture diagram
 
@@ -461,6 +470,7 @@ flowchart TB
         end
 
         Storage["storage.py — SessionStore\n(in-memory dict + disk temp files)\nF2 fixed: max_total_bytes cap\nF3 fixed: generic cache, no Background import"]
+        BatchRegistry["storage.py — BatchRegistry\n(batch_id -> [image_id]; own lock)\nsplit out of SessionStore"]
 
         Upload --> Validators
         Upload --> Pipeline
@@ -468,10 +478,12 @@ flowchart TB
         Process --> Presets
         Process --> AutoOptimize
         Batch --> Pipeline
+        Batch --> Storage
         Download --> Pipeline
         Pipeline --> Storage
         Pipeline --> ImageProcessor
         Pipeline -->|"decides when to call, per F3 fix"| Background
+        Storage --> BatchRegistry
         Upload --> Responses
         Process --> Responses
         Batch --> Responses
@@ -483,16 +495,17 @@ flowchart TB
     Storage -->|"original bytes"| DiskTemp[["%TEMP%/imageapp/<image_id>/original.*"]]
 
     classDef fixed fill:#d4edda,stroke:#2e7d32
-    class Storage,Background fixed
+    class Storage,Background,BatchRegistry fixed
 ```
 
 **Bottlenecks originally called out in the diagram, now mitigated**: `Storage` (F2 — was
 unbounded in-memory retention between TTL sweeps, now capped by `max_total_bytes`; F3's layering
 leak also resolved — `Pipeline`, not `Storage`, now decides when `Background` runs) and
 `Background` (F5 — was no concurrency throttle on CPU-bound ONNX inference, now bounded by a
-semaphore). The only external service integration is the one-time ISNet model download from a
-GitHub release asset (`background.py:28-29`); after that first fetch, the app runs fully offline
-(`README.md:82-84`).
+semaphore with a fail-fast timeout). `BatchRegistry` is new in this diagram — it's the extraction
+described in §3 that closed the last "god object" gap on `SessionStore`. The only external service
+integration is the one-time ISNet model download from a GitHub release asset
+(`background.py:28-29`); after that first fetch, the app runs fully offline (`README.md:82-84`).
 
 ## 8. Summary table
 
@@ -502,11 +515,16 @@ GitHub release asset (`background.py:28-29`); after that first fetch, the app ru
 | F2 | No total in-memory session byte cap | bottleneck / missing resource limit | 8/10 | **Fixed** — `SessionStore.max_total_bytes` |
 | F3 | `storage.py` directly calls `background.py` (persistence → domain leak) | tight coupling / layering | 5/10 | **Fixed** — `get_or_compute_working_bytes()` |
 | F4 | Client-side resize/rotate math duplicates server logic | copy-paste (cross-language) | 4/10 | **Fixed** (cross-ref comment, per its own scoped recommendation) |
-| F5 | No concurrency throttle on ONNX inference | bottleneck | 4/10 | **Fixed** — `_inference_semaphore` (request-level 503 timeout deferred, noted as a deliberate remaining gap) |
+| F5 | No concurrency throttle on ONNX inference | bottleneck | 4/10 | **Fixed** — `_inference_semaphore` + fail-fast `BackgroundRemovalBusyError` on timeout |
 | F6 | Inaccurate "avoids a cycle" comment in `background.py` | doc accuracy | 2/10 | **Fixed** — import moved to top, comment corrected |
 
-**Modularity: 7/10 → 9/10** after remediation (§6). Verification for all six: full pytest suite
-(69/69 passing) plus live manual exercise of `/api/upload`, `/api/process`, `/api/reset`,
-`/api/upload/batch`, `/api/batch/process`, and background removal (`remove_background: true`)
-against the running dev server, and `node --check` / `python -m py_compile` on every changed file.
+Two items noted in the original audit as open-but-not-urgent were also closed in a follow-up pass:
+`SettingsPanel`'s god-module status (§3, resolved via `Codec`/`Layout`) and `SessionStore`'s
+mixed batch/session responsibilities (§3, resolved via `BatchRegistry`).
+
+**Modularity: 7/10 → 9/10 → 10/10** across the two remediation passes (§6). Verification for all
+of the above: full pytest suite (69/69 passing) plus live manual exercise of `/api/upload`,
+`/api/process`, `/api/reset`, `/api/upload/batch`, `/api/batch/process`, `/api/batch/<id>/status`,
+`DELETE /api/session/batch/<id>`, and background removal (`remove_background: true`) against the
+running dev server, plus `node --check` / `python -m py_compile` on every changed file.
 
