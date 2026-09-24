@@ -5,7 +5,6 @@ from flask import Blueprint, current_app, jsonify, request, send_file
 
 from .. import pipeline
 from ..errors import AppError, ValidationError
-from ..responses import build_process_result
 from ..settings import ImageSettings, SettingsValidationError
 from ..utils import filename_with_extension
 
@@ -31,9 +30,7 @@ def batch_process():
     results = []
     for image_id in member_ids:
         try:
-            output_bytes, stats, warnings = pipeline.run_pipeline(store, image_id, settings)
-            store.update_settings(image_id, settings.to_dict())
-            result = build_process_result(store, image_id, settings, output_bytes, stats, warnings)
+            result = pipeline.run_and_persist(store, image_id, settings)
             result["status"] = "ok"
             results.append(result)
         except AppError as exc:

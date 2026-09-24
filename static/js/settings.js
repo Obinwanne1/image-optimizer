@@ -1,4 +1,5 @@
 const SettingsPanel = (() => {
+  // ---- Elements: DOM refs only, no behavior --------------------------------
   const els = {
     formatSelect: document.getElementById("format-select"),
     qualitySlider: document.getElementById("quality-slider"),
@@ -66,6 +67,129 @@ const SettingsPanel = (() => {
   let backgroundImageSelectedCallback = null;
   let backgroundImageClearCallback = null;
 
+  // ---- Codec: pure two-way mapping between `els` and a settings object ----
+  // No event wiring and no layout decisions here — only "settings object in,
+  // DOM values out" and back. Kept separate from loadState()/bindEvents() so
+  // the serialization rules (which field maps to which control, and how) can
+  // be read/changed without wading through event-handling code.
+  const Codec = {
+    write(settingsDict) {
+      els.formatSelect.value = settingsDict.format;
+      els.qualitySlider.value = settingsDict.quality;
+      els.qualityValue.textContent = settingsDict.quality + "%";
+      els.brightnessSlider.value = settingsDict.brightness;
+      els.brightnessValue.textContent = Number(settingsDict.brightness).toFixed(2);
+      els.contrastSlider.value = settingsDict.contrast;
+      els.contrastValue.textContent = Number(settingsDict.contrast).toFixed(2);
+      els.saturationSlider.value = settingsDict.saturation;
+      els.saturationValue.textContent = Number(settingsDict.saturation).toFixed(2);
+      els.exposureSlider.value = settingsDict.exposure;
+      els.exposureValue.textContent = settingsDict.exposure;
+      els.grayscaleCheck.checked = settingsDict.grayscale;
+      els.sharpenSlider.value = settingsDict.sharpen_amount;
+      els.sharpenValue.textContent = settingsDict.sharpen_amount;
+      els.sharpenRadiusSlider.value = settingsDict.sharpen_radius;
+      els.sharpenRadiusValue.textContent = Number(settingsDict.sharpen_radius).toFixed(1);
+      els.blurSlider.value = settingsDict.blur_amount;
+      els.blurValue.textContent = settingsDict.blur_amount;
+
+      els.resizeModeSelect.value = settingsDict.resize_mode;
+      els.resizePercentageSlider.value = settingsDict.resize_percentage;
+      els.resizePercentageValue.textContent = settingsDict.resize_percentage + "%";
+      els.resizeWidthInput.value = settingsDict.resize_width || "";
+      els.resizeHeightInput.value = settingsDict.resize_height || "";
+      els.maintainAspectCheck.checked = settingsDict.maintain_aspect;
+      CropTool.loadRect({
+        crop_x: settingsDict.crop_x,
+        crop_y: settingsDict.crop_y,
+        crop_width: settingsDict.crop_width,
+        crop_height: settingsDict.crop_height,
+      });
+
+      els.stripMetadataCheck.checked = settingsDict.strip_metadata;
+      els.progressiveCheck.checked = settingsDict.progressive;
+      els.losslessCheck.checked = settingsDict.lossless;
+      els.webpMethodSlider.value = settingsDict.webp_method;
+      els.webpMethodValue.textContent = settingsDict.webp_method;
+
+      els.flipHBtn.classList.toggle("active", !!settingsDict.flip_horizontal);
+      els.flipVBtn.classList.toggle("active", !!settingsDict.flip_vertical);
+
+      els.removeBackgroundCheck.checked = !!settingsDict.remove_background;
+      els.backgroundModeSelect.value = settingsDict.background_mode || "transparent";
+      els.backgroundColorInput.value = settingsDict.background_color || "#ffffff";
+    },
+
+    read() {
+      return {
+        quality: parseInt(els.qualitySlider.value, 10),
+        format: els.formatSelect.value,
+        sharpen_amount: parseFloat(els.sharpenSlider.value),
+        sharpen_radius: parseFloat(els.sharpenRadiusSlider.value),
+        blur_amount: parseFloat(els.blurSlider.value),
+        brightness: parseFloat(els.brightnessSlider.value),
+        contrast: parseFloat(els.contrastSlider.value),
+        saturation: parseFloat(els.saturationSlider.value),
+        exposure: parseInt(els.exposureSlider.value, 10),
+        grayscale: els.grayscaleCheck.checked,
+        rotate_degrees: state.rotate_degrees || 0,
+        flip_horizontal: els.flipHBtn.classList.contains("active"),
+        flip_vertical: els.flipVBtn.classList.contains("active"),
+        resize_mode: els.resizeModeSelect.value,
+        resize_width: els.resizeWidthInput.value ? parseInt(els.resizeWidthInput.value, 10) : null,
+        resize_height: els.resizeHeightInput.value ? parseInt(els.resizeHeightInput.value, 10) : null,
+        resize_percentage: parseFloat(els.resizePercentageSlider.value),
+        maintain_aspect: els.maintainAspectCheck.checked,
+        crop_x: parseInt(els.cropXInput.value, 10) || 0,
+        crop_y: parseInt(els.cropYInput.value, 10) || 0,
+        crop_width: els.cropWidthInput.value ? parseInt(els.cropWidthInput.value, 10) : null,
+        crop_height: els.cropHeightInput.value ? parseInt(els.cropHeightInput.value, 10) : null,
+        strip_metadata: els.stripMetadataCheck.checked,
+        progressive: els.progressiveCheck.checked,
+        lossless: els.losslessCheck.checked,
+        webp_method: parseInt(els.webpMethodSlider.value, 10),
+        auto_orient: state.auto_orient !== undefined ? state.auto_orient : true,
+        remove_background: els.removeBackgroundCheck.checked,
+        background_mode: els.backgroundModeSelect.value,
+        background_color: els.backgroundColorInput.value,
+      };
+    },
+  };
+
+  // ---- Layout: show/hide widget groups for the currently selected mode ----
+  // Pure visibility/active-state toggling, no settings serialization and no
+  // network/apply calls — callers decide when to invoke these and whether to
+  // also schedule an apply.
+  const Layout = {
+    toggleResizeGroups() {
+      const mode = els.resizeModeSelect.value;
+      els.resizePercentageGroup.hidden = mode !== "percentage";
+      els.resizeDimsGroup.hidden = mode !== "dimensions";
+      els.presetDimsGroup.hidden = mode !== "dimensions";
+      els.resizeCropGroup.hidden = mode !== "crop";
+      if (mode === "crop") {
+        CropTool.show();
+        syncCropInputsFromTool();
+      } else {
+        CropTool.hide();
+      }
+    },
+    toggleFormatGroups() {
+      els.webpMethodGroup.hidden = els.formatSelect.value !== "WEBP";
+    },
+    toggleBackgroundGroups() {
+      els.backgroundFillGroup.hidden = !els.removeBackgroundCheck.checked;
+      const mode = els.backgroundModeSelect.value;
+      els.backgroundColorGroup.hidden = mode !== "color";
+      els.backgroundImageUploadGroup.hidden = mode !== "image";
+    },
+    syncQuickButtons() {
+      document.querySelectorAll(".quick-buttons [data-quality]").forEach((btn) => {
+        btn.classList.toggle("active", String(state.quality) === btn.dataset.quality);
+      });
+    },
+  };
+
   function setOriginalDims(w, h) {
     originalDims = { width: w, height: h };
     els.originalDimsReadout.textContent = `${w} × ${h}`;
@@ -73,6 +197,9 @@ const SettingsPanel = (() => {
     updateResultReadout();
   }
 
+  // Mirrors _apply_resize()/rotate handling in app/image_processor.py — keep the rounding
+  // rule (Math.round / round()) identical on both sides or this pre-apply readout will drift
+  // from the actual server output by a pixel.
   function updateResultReadout() {
     if (!originalDims.width) {
       els.resultDimsReadout.textContent = "—";
@@ -117,128 +244,23 @@ const SettingsPanel = (() => {
     els.cropHeightInput.value = Math.round(r.height);
   }
 
-  function toggleResizeGroups() {
-    const mode = els.resizeModeSelect.value;
-    els.resizePercentageGroup.hidden = mode !== "percentage";
-    els.resizeDimsGroup.hidden = mode !== "dimensions";
-    els.presetDimsGroup.hidden = mode !== "dimensions";
-    els.resizeCropGroup.hidden = mode !== "crop";
-    if (mode === "crop") {
-      CropTool.show();
-      syncCropInputsFromTool();
-    } else {
-      CropTool.hide();
-    }
-  }
-
-  function toggleFormatGroups() {
-    els.webpMethodGroup.hidden = els.formatSelect.value !== "WEBP";
-  }
-
-  function toggleBackgroundGroups() {
-    els.backgroundFillGroup.hidden = !els.removeBackgroundCheck.checked;
-    const mode = els.backgroundModeSelect.value;
-    els.backgroundColorGroup.hidden = mode !== "color";
-    els.backgroundImageUploadGroup.hidden = mode !== "image";
-  }
-
-  function syncQuickButtons() {
-    document.querySelectorAll(".quick-buttons [data-quality]").forEach((btn) => {
-      btn.classList.toggle("active", String(state.quality) === btn.dataset.quality);
-    });
-  }
-
   function loadState(settingsDict) {
     suppressEvents = true;
     state = { ...settingsDict };
 
-    els.formatSelect.value = state.format;
-    els.qualitySlider.value = state.quality;
-    els.qualityValue.textContent = state.quality + "%";
-    els.brightnessSlider.value = state.brightness;
-    els.brightnessValue.textContent = Number(state.brightness).toFixed(2);
-    els.contrastSlider.value = state.contrast;
-    els.contrastValue.textContent = Number(state.contrast).toFixed(2);
-    els.saturationSlider.value = state.saturation;
-    els.saturationValue.textContent = Number(state.saturation).toFixed(2);
-    els.exposureSlider.value = state.exposure;
-    els.exposureValue.textContent = state.exposure;
-    els.grayscaleCheck.checked = state.grayscale;
-    els.sharpenSlider.value = state.sharpen_amount;
-    els.sharpenValue.textContent = state.sharpen_amount;
-    els.sharpenRadiusSlider.value = state.sharpen_radius;
-    els.sharpenRadiusValue.textContent = Number(state.sharpen_radius).toFixed(1);
-    els.blurSlider.value = state.blur_amount;
-    els.blurValue.textContent = state.blur_amount;
+    Codec.write(state);
 
-    els.resizeModeSelect.value = state.resize_mode;
-    els.resizePercentageSlider.value = state.resize_percentage;
-    els.resizePercentageValue.textContent = state.resize_percentage + "%";
-    els.resizeWidthInput.value = state.resize_width || "";
-    els.resizeHeightInput.value = state.resize_height || "";
-    els.maintainAspectCheck.checked = state.maintain_aspect;
-    CropTool.loadRect({
-      crop_x: state.crop_x,
-      crop_y: state.crop_y,
-      crop_width: state.crop_width,
-      crop_height: state.crop_height,
-    });
-
-    els.stripMetadataCheck.checked = state.strip_metadata;
-    els.progressiveCheck.checked = state.progressive;
-    els.losslessCheck.checked = state.lossless;
-    els.webpMethodSlider.value = state.webp_method;
-    els.webpMethodValue.textContent = state.webp_method;
-
-    els.flipHBtn.classList.toggle("active", !!state.flip_horizontal);
-    els.flipVBtn.classList.toggle("active", !!state.flip_vertical);
-
-    els.removeBackgroundCheck.checked = !!state.remove_background;
-    els.backgroundModeSelect.value = state.background_mode || "transparent";
-    els.backgroundColorInput.value = state.background_color || "#ffffff";
-
-    toggleResizeGroups();
-    toggleFormatGroups();
-    toggleBackgroundGroups();
-    syncQuickButtons();
+    Layout.toggleResizeGroups();
+    Layout.toggleFormatGroups();
+    Layout.toggleBackgroundGroups();
+    Layout.syncQuickButtons();
     updateResultReadout();
     els.presetSelect.value = "";
     suppressEvents = false;
   }
 
   function getCurrentSettings() {
-    return {
-      quality: parseInt(els.qualitySlider.value, 10),
-      format: els.formatSelect.value,
-      sharpen_amount: parseFloat(els.sharpenSlider.value),
-      sharpen_radius: parseFloat(els.sharpenRadiusSlider.value),
-      blur_amount: parseFloat(els.blurSlider.value),
-      brightness: parseFloat(els.brightnessSlider.value),
-      contrast: parseFloat(els.contrastSlider.value),
-      saturation: parseFloat(els.saturationSlider.value),
-      exposure: parseInt(els.exposureSlider.value, 10),
-      grayscale: els.grayscaleCheck.checked,
-      rotate_degrees: state.rotate_degrees || 0,
-      flip_horizontal: els.flipHBtn.classList.contains("active"),
-      flip_vertical: els.flipVBtn.classList.contains("active"),
-      resize_mode: els.resizeModeSelect.value,
-      resize_width: els.resizeWidthInput.value ? parseInt(els.resizeWidthInput.value, 10) : null,
-      resize_height: els.resizeHeightInput.value ? parseInt(els.resizeHeightInput.value, 10) : null,
-      resize_percentage: parseFloat(els.resizePercentageSlider.value),
-      maintain_aspect: els.maintainAspectCheck.checked,
-      crop_x: parseInt(els.cropXInput.value, 10) || 0,
-      crop_y: parseInt(els.cropYInput.value, 10) || 0,
-      crop_width: els.cropWidthInput.value ? parseInt(els.cropWidthInput.value, 10) : null,
-      crop_height: els.cropHeightInput.value ? parseInt(els.cropHeightInput.value, 10) : null,
-      strip_metadata: els.stripMetadataCheck.checked,
-      progressive: els.progressiveCheck.checked,
-      lossless: els.losslessCheck.checked,
-      webp_method: parseInt(els.webpMethodSlider.value, 10),
-      auto_orient: state.auto_orient !== undefined ? state.auto_orient : true,
-      remove_background: els.removeBackgroundCheck.checked,
-      background_mode: els.backgroundModeSelect.value,
-      background_color: els.backgroundColorInput.value,
-    };
+    return Codec.read();
   }
 
   function scheduleApply(immediate) {
@@ -269,14 +291,14 @@ const SettingsPanel = (() => {
     sliderBindings.forEach(([slider, label, fmt]) => {
       slider.addEventListener("input", () => {
         label.textContent = fmt(slider.value);
-        if (slider === els.qualitySlider) syncQuickButtons();
+        if (slider === els.qualitySlider) Layout.syncQuickButtons();
         updateResultReadout();
         scheduleApply(false);
       });
     });
 
     els.formatSelect.addEventListener("change", () => {
-      toggleFormatGroups();
+      Layout.toggleFormatGroups();
       scheduleApply(true);
     });
     [els.grayscaleCheck, els.stripMetadataCheck, els.progressiveCheck, els.losslessCheck].forEach((el) => {
@@ -295,7 +317,7 @@ const SettingsPanel = (() => {
       scheduleApply(false);
     });
     els.resizeModeSelect.addEventListener("change", () => {
-      toggleResizeGroups();
+      Layout.toggleResizeGroups();
       updateResultReadout();
       scheduleApply(true);
     });
@@ -330,11 +352,11 @@ const SettingsPanel = (() => {
     });
 
     els.removeBackgroundCheck.addEventListener("change", () => {
-      toggleBackgroundGroups();
+      Layout.toggleBackgroundGroups();
       scheduleApply(true);
     });
     els.backgroundModeSelect.addEventListener("change", () => {
-      toggleBackgroundGroups();
+      Layout.toggleBackgroundGroups();
       scheduleApply(true);
     });
     els.backgroundColorInput.addEventListener("input", () => scheduleApply(false));
@@ -372,7 +394,7 @@ const SettingsPanel = (() => {
       btn.addEventListener("click", () => {
         els.qualitySlider.value = btn.dataset.quality;
         els.qualityValue.textContent = btn.dataset.quality + "%";
-        syncQuickButtons();
+        Layout.syncQuickButtons();
         scheduleApply(true);
       });
     });

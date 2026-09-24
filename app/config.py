@@ -14,6 +14,10 @@ class Config:
     MAX_SINGLE_FILE_SIZE = int(os.environ.get("MAX_SINGLE_FILE_SIZE", 25 * 1024 * 1024))
     MAX_IMAGE_DIMENSION_PIXELS = int(os.environ.get("MAX_IMAGE_DIMENSION_PIXELS", 8000 * 8000))
     MAX_BATCH_FILES = int(os.environ.get("MAX_BATCH_FILES", 30))
+    # Total bytes held in-memory across all live sessions at once (independent of the TTL
+    # cleanup sweep) — bounds worst-case memory growth from a sustained upload rate within one
+    # SESSION_TTL_SECONDS window, which MAX_SINGLE_FILE_SIZE/MAX_BATCH_FILES alone don't cap.
+    MAX_TOTAL_SESSION_BYTES = int(os.environ.get("MAX_TOTAL_SESSION_BYTES", 500 * 1024 * 1024))
 
     TEMP_DIR = os.environ.get("IMAGEAPP_TEMP_DIR", os.path.join(tempfile.gettempdir(), "imageapp"))
 

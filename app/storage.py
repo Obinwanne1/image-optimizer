@@ -7,8 +7,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from . import background as bg_module
-from .errors import SessionNotFoundError
+from .errors import SessionNotFoundError, ValidationError
 from .image_processor import get_original_info
 from .settings import ImageSettings
 from .utils import new_id
@@ -53,18 +52,32 @@ class SessionEntry:
 
 
 class SessionStore:
-    def __init__(self, temp_dir: str, ttl_seconds: int):
+    def __init__(self, temp_dir: str, ttl_seconds: int, max_total_bytes: Optional[int] = None):
         self.temp_dir = temp_dir
         self.ttl_seconds = ttl_seconds
+        # Caps total bytes held in `original_bytes` across all in-memory sessions, independent
+        # of the TTL sweep — without this, a sustained upload rate within one TTL window (default
+        # 45 min) can grow memory without bound, since MAX_SINGLE_FILE_SIZE/MAX_BATCH_FILES only
+        # cap a single request, not cumulative retention. None disables the cap (unbounded).
+        self.max_total_bytes = max_total_bytes
         self._sessions: Dict[str, SessionEntry] = {}
         self._batches: Dict[str, List[str]] = {}
         self._global_lock = threading.Lock()
+        self._total_bytes = 0
         os.makedirs(self.temp_dir, exist_ok=True)
 
     # -- session lifecycle -------------------------------------------------
 
     def create_session(self, original_bytes: bytes, original_filename: str, batch_id: Optional[str] = None) -> str:
         info = get_original_info(original_bytes)
+
+        with self._global_lock:
+            if self.max_total_bytes is not None and self._total_bytes + len(original_bytes) > self.max_total_bytes:
+                raise ValidationError(
+                    "Server is at capacity (too many images held in memory). Try again shortly."
+                )
+            self._total_bytes += len(original_bytes)
+
         image_id = new_id()
         ext = _EXT_BY_FORMAT.get(info["format"], "bin")
         session_dir = os.path.join(self.temp_dir, image_id)
@@ -129,6 +142,9 @@ class SessionStore:
         )
         with self._global_lock:
             self._sessions[image_id] = entry
+            # Rehydrated data already legitimately existed on disk (this isn't a new upload),
+            # so it's tracked for future cap checks but not itself rejected by max_total_bytes.
+            self._total_bytes += len(original_bytes)
         os.utime(disk_path, None)
         return entry
 
@@ -140,18 +156,19 @@ class SessionStore:
             entry.original_bytes = f.read()
         return entry.original_bytes
 
-    def get_working_bytes(self, image_id: str, settings: ImageSettings) -> bytes:
-        """Returns the bytes the processing pipeline should treat as its source: the true
-        original, or — when background removal is requested — a background-removed cutout
-        computed once via U2Net and cached on the session (deterministic given the same
-        original, so it's safe to reuse across every subsequent apply/reset/preset call)."""
-        if not settings.remove_background:
-            return self.get_original_bytes(image_id)
+    def get_or_compute_working_bytes(self, image_id: str, compute_fn) -> bytes:
+        """Generic memoized derived-bytes cache keyed on the session's original image: the
+        caller (app/pipeline.py) decides *when* a derived artifact (e.g. a background-removed
+        cutout) is needed and supplies `compute_fn(original_bytes) -> bytes`; this store only
+        knows how to cache the result, not why it exists — that keeps SessionStore a pure
+        persistence/cache layer with no knowledge of specific domain operations like background
+        removal. Deterministic given the same original, so it's safe to reuse across every
+        subsequent apply/reset/preset call for this session."""
         entry = self._get_entry(image_id)
         with entry.lock:
             if entry.bg_removed_cache is None:
                 original = self.get_original_bytes(image_id)
-                entry.bg_removed_cache = bg_module.remove_background_bytes(original)
+                entry.bg_removed_cache = compute_fn(original)
             return entry.bg_removed_cache
 
     def set_background_image(self, image_id: str, data: bytes, filename: str) -> None:
@@ -209,6 +226,8 @@ class SessionStore:
         _validate_id(image_id)
         with self._global_lock:
             entry = self._sessions.pop(image_id, None)
+            if entry and entry.original_bytes is not None:
+                self._total_bytes = max(0, self._total_bytes - len(entry.original_bytes))
             if entry and entry.batch_id and entry.batch_id in self._batches:
                 try:
                     self._batches[entry.batch_id].remove(image_id)

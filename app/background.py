@@ -7,6 +7,7 @@ import onnxruntime as ort
 from PIL import Image, ImageFilter
 
 from .errors import AppError
+from .image_processor import open_and_validate  # no cycle: image_processor never imports background
 
 # ISNet ("isnet-general-use") ONNX weights — rembg's own recommended general-purpose
 # model, fetched from rembg's model release (the same file rembg itself downloads).
@@ -50,6 +51,14 @@ _COMPONENT_ANALYSIS_SIZE = (128, 128)
 
 _session = None
 _session_lock = threading.Lock()
+
+# Bounds concurrent CPU-bound ONNX inference calls. _session_lock only guards one-time session
+# construction — without this, N simultaneous remove_background=True requests would all run
+# 1024x1024 inference at once with no queueing, degrading latency for all of them instead of
+# serializing predictably. Sized to half the available cores, leaving headroom for the rest of
+# the Flask process (request handling, Pillow encode/decode) under concurrent load.
+_INFERENCE_CONCURRENCY = max(1, (os.cpu_count() or 2) // 2)
+_inference_semaphore = threading.Semaphore(_INFERENCE_CONCURRENCY)
 
 
 class BackgroundRemovalError(AppError):
@@ -175,7 +184,8 @@ def _predict_mask(rgb_img: Image.Image) -> Image.Image:
     tensor = normalized.transpose((2, 0, 1))[None].astype(np.float32)
 
     input_name = session.get_inputs()[0].name
-    outputs = session.run(None, {input_name: tensor})
+    with _inference_semaphore:
+        outputs = session.run(None, {input_name: tensor})
     pred = outputs[0][:, 0, :, :]
     lo, hi = float(pred.min()), float(pred.max())
     pred = (pred - lo) / max(hi - lo, 1e-6)
@@ -191,8 +201,6 @@ def remove_background_bytes(original_bytes: bytes) -> bytes:
     """Runs ISNet foreground segmentation on the original image and returns PNG
     bytes with the background made transparent. Pure function: same input bytes
     always produce the same output (given the same cached model weights)."""
-    from .image_processor import open_and_validate  # local import avoids a cycle
-
     img = open_and_validate(original_bytes).convert("RGB")
     mask = _predict_mask(img)
     rgba = img.convert("RGBA")

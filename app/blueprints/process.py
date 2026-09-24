@@ -3,18 +3,11 @@ from flask import Blueprint, current_app, jsonify, request
 from .. import pipeline
 from ..presets import list_presets, resolve_preset
 from ..auto_optimize import suggest_settings
-from ..responses import build_process_result
 from ..settings import ImageSettings, SettingsValidationError
 from ..errors import ValidationError
 from ..validators import validate_and_probe_image, validate_extension, validate_file_size
 
 process_bp = Blueprint("process", __name__)
-
-
-def _run_pipeline(store, image_id: str, settings: ImageSettings) -> dict:
-    output_bytes, stats, warnings = pipeline.run_pipeline(store, image_id, settings)
-    store.update_settings(image_id, settings.to_dict())
-    return build_process_result(store, image_id, settings, output_bytes, stats, warnings)
 
 
 @process_bp.route("/process/<image_id>", methods=["POST"])
@@ -27,7 +20,7 @@ def process_image(image_id):
         settings = ImageSettings.from_dict(body)
     except SettingsValidationError as exc:
         raise ValidationError(str(exc))
-    result = _run_pipeline(store, image_id, settings)
+    result = pipeline.run_and_persist(store, image_id, settings)
     return jsonify(result)
 
 
@@ -36,7 +29,7 @@ def reset_image(image_id):
     store = current_app.session_store
     settings_dict = store.reset_settings(image_id)
     settings = ImageSettings.from_dict(settings_dict)
-    result = _run_pipeline(store, image_id, settings)
+    result = pipeline.run_and_persist(store, image_id, settings)
     return jsonify(result)
 
 
@@ -58,7 +51,7 @@ def apply_preset(preset_id, image_id):
     store = current_app.session_store
     info = store.get_info(image_id)
     settings = resolve_preset(preset_id, info["width"], info["height"])
-    result = _run_pipeline(store, image_id, settings)
+    result = pipeline.run_and_persist(store, image_id, settings)
     return jsonify(result)
 
 
@@ -67,7 +60,7 @@ def auto_optimize_image(image_id):
     store = current_app.session_store
     info = store.get_info(image_id)
     settings = suggest_settings(info)
-    result = _run_pipeline(store, image_id, settings)
+    result = pipeline.run_and_persist(store, image_id, settings)
     return jsonify(result)
 
 

@@ -18,6 +18,7 @@ def create_app(config_class=Config):
     store = SessionStore(
         temp_dir=app.config["TEMP_DIR"],
         ttl_seconds=app.config["SESSION_TTL_SECONDS"],
+        max_total_bytes=app.config["MAX_TOTAL_SESSION_BYTES"],
     )
     app.session_store = store
     store.start_cleanup_thread(app.config["CLEANUP_INTERVAL_SECONDS"])
